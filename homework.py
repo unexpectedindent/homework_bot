@@ -1,65 +1,50 @@
 import logging
 import logging.config
-import os
+import sys
 import time
+from http import HTTPStatus
 
 import requests
 import telegram
 
-from dotenv import load_dotenv
+from config import (ENDPOINT, HEADERS, HOMEWORK_STATUSES,
+                    LOGGING_CONFIG, RETRY_TIME,
+                    PRACTICUM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_TOKEN)
+from exceptions import ResponseContentError
 
-from config import LOGGING_CONFIG
-from exceptions import (
-    CanNotSendMessageError,
-    RemoteServerError,
-    ResponseContentError,
-    TokenError
-)
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-PRACTICUM_TOKEN = os.getenv('YP_TOKEN')
-TELEGRAM_TOKEN = os.getenv('TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('ME')
-
-RETRY_TIME = 600
-ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
-HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
-
-HOMEWORK_STATUSES = {
-    'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
-    'reviewing': 'Работа взята на проверку ревьюером.',
-    'rejected': 'Работа проверена: у ревьюера есть замечания.'
-}
-
 
 def send_message(bot: telegram.Bot, message: str) -> None:
-    """Send message with status update."""
-    if bot:
+    """Send message into Telegram chat."""
+    try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logger.info('Message is sent')
-    else:
-        logger.error('Sending message failed')
-        raise CanNotSendMessageError('Sending message failed')
+    except telegram.error.TelegramError:
+        raise telegram.error.TelegramError('Sending message is failed')
 
 
 def get_api_answer(current_timestamp: int) -> dict:
     """Get info about homeworks statuses."""
     timestamp = current_timestamp or int(time.time())
     params = {'from_date': timestamp}
+    logger.debug('Try make request to API')
     response = requests.get(
         url=ENDPOINT,
         params=params,
         headers=HEADERS
     )
-    if response.status_code == 200:
+    if response.status_code == HTTPStatus.OK:
         logger.debug('Response from server is gotten')
-        return response.json()
+        try:
+            return response.json()
+        except AttributeError:
+            raise AttributeError(
+                'Response doesnt contain data in json format'
+            )
     else:
-        logger.debug('Connection with server is failed')
-        raise RemoteServerError('Connection with server is failed')
+        raise ConnectionError('Connection with server is failed')
 
 
 def check_response(response: dict) -> list:
@@ -68,34 +53,37 @@ def check_response(response: dict) -> list:
         logger.debug('Response contains dictionary')
         if isinstance(response.get('homeworks'), list):
             logger.debug('Response contains data')
-            return response.get('homeworks')
-        logger.warning('Response is empty')
+            if len(response['homeworks']):
+                logger.debug('Response contains valid data')
+                return response.get('homeworks')
+            logger.warning('Response contains empty data')
         raise ResponseContentError('Response doesnt contain homeworks data')
-    logger.error(f'Response type: {type(response).__name__}')
-    raise TypeError('Incorrect response')
+    raise TypeError(f'Response type: {type(response).__name__}')
 
 
 def parse_status(homework: dict) -> str:
     """Generate message with task status."""
     homework_name = homework.get('homework_name')
+    if not homework_name:
+        raise KeyError('Data doesnt contain info about task name')
     homework_status = homework.get('status')
+    if not homework_status:
+        raise KeyError('Data doesnt contain info about task status')
     verdict = HOMEWORK_STATUSES[homework_status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def check_tokens() -> bool:
     """Check the tokens."""
-    tokens = (
+    return all((
         PRACTICUM_TOKEN,
         TELEGRAM_TOKEN,
         TELEGRAM_CHAT_ID
-    )
-    return all(tokens)
+    ))
 
 
 def main() -> None:
-    """Основная логика работы бота."""
-    logging.config.dictConfig(LOGGING_CONFIG)
+    """Base bot logic."""
     if not check_tokens():
         tokens = {
             'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
@@ -105,23 +93,26 @@ def main() -> None:
         for token_name, token in tokens.items():
             if not token:
                 logger.critical(f'{token_name} failure')
-        raise TokenError
+        sys.exit('Incorrect token(s)')
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time())
     homework_state = {}
     while True:
+        logger.debug('Circles start')
         try:
             response = get_api_answer(current_timestamp - RETRY_TIME)
             for homework in check_response(response):
                 if homework_state.get(homework['id']) != homework['status']:
                     homework_state[homework['id']] = homework['status']
                     send_message(bot, parse_status(homework))
+                else:
+                    logger.debug('No status change')
         except Exception as error:
-            logger.exception(f'Сбой в работе программы: {error}')
-            time.sleep(RETRY_TIME)
-        else:
+            logger.exception(f'Program failed: {error}')
+        finally:
             time.sleep(RETRY_TIME)
 
 
 if __name__ == '__main__':
+    logging.config.dictConfig(LOGGING_CONFIG)
     main()
