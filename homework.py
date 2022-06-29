@@ -8,25 +8,25 @@ import telegram
 
 from dotenv import load_dotenv
 
-from telegram import ReplyKeyboardMarkup
-from telegram.ext import CommandHandler, Updater
-
-from exceptions import *
 from config import LOGGING_CONFIG
+from exceptions import (
+    CanNotSendMessageError,
+    RemoteServerError,
+    ResponseContentError,
+    TokenError
+)
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
 PRACTICUM_TOKEN = os.getenv('YP_TOKEN')
-TELEGRAM_TOKEN= os.getenv('TOKEN')
+TELEGRAM_TOKEN = os.getenv('TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('ME')
 
 RETRY_TIME = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
-
 
 HOMEWORK_STATUSES = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
@@ -37,13 +37,12 @@ HOMEWORK_STATUSES = {
 
 def send_message(bot: telegram.Bot, message: str) -> None:
     """Send message with status update."""
-    try:
+    if bot:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    except:
+        logger.info('Message is sent')
+    else:
         logger.error('Sending message failed')
         raise CanNotSendMessageError('Sending message failed')
-    else:
-        logger.info('Message is sent')
 
 
 def get_api_answer(current_timestamp: int) -> dict:
@@ -64,7 +63,7 @@ def get_api_answer(current_timestamp: int) -> dict:
 
 
 def check_response(response: dict) -> list:
-    """Checks """
+    """Checks response from server."""
     if isinstance(response, dict):
         logger.debug('Response contains dictionary')
         if isinstance(response.get('homeworks'), list):
@@ -77,6 +76,7 @@ def check_response(response: dict) -> list:
 
 
 def parse_status(homework: dict) -> str:
+    """Generate message with task status."""
     homework_name = homework.get('homework_name')
     homework_status = homework.get('status')
     verdict = HOMEWORK_STATUSES[homework_status]
